@@ -329,9 +329,43 @@ elif [ $HAVE_ROOT -eq 0 ]; then
   warn "no root — if the UI is unreachable, ask your admin: firewall-cmd --permanent --add-port=$PORT/tcp && firewall-cmd --reload"
 fi
 
+# --- MySQL connectivity diagnostic -------------------------------------------
+# /api/health passes even when the DB is unreachable, so probe the ACTUAL
+# credentials (via the image's bundled mysql2) and report the SPECIFIC reason —
+# otherwise a wrong password / missing grant looks like a successful install
+# until the first login fails. Reads the mounted settings.json (works on re-runs
+# too, where the shell has no MYSQL_* vars). Warn-only: the DB may come up later.
+mysql_diag() {
+  local img out code
+  img=$(sed -n 's/^IMAGE=//p' .env | head -1); img=${img:-${IMAGE:-$IMAGE_DEFAULT}}
+  out=$($DOCKER run --rm --network host \
+        -v "$PWD/settings.json:/app/server/settings.json:ro,z" -w /app/server "$img" \
+        node -e 'const fs=require("fs"),m=require("mysql2/promise");const c=JSON.parse(fs.readFileSync("/app/server/settings.json","utf8")).auth.mysql;m.createConnection({host:c.host,port:c.port,user:c.user,password:c.password||"",database:c.database,connectTimeout:8000}).then(x=>x.query("SELECT 1").then(()=>x.end()).then(()=>console.log("OK "+c.user+"@"+c.host+":"+c.port+"/"+c.database))).catch(e=>{console.log("ERR "+(e.code||"UNKNOWN")+" "+String(e.sqlMessage||e.message||"").split("\n")[0]);process.exit(2)})' 2>/dev/null) || true
+  if [ "${out#OK }" != "$out" ]; then ok "MySQL connection OK — ${out#OK }"; return 0; fi
+  warn "MySQL connection FAILED: ${out:-(could not run the probe image)}"
+  code=$(printf '%s\n' "$out" | awk 'NR==1{print $2}')
+  case "$code" in
+    ECONNREFUSED)               warn "  → nothing is listening there — MariaDB is down, MYSQL_PORT is wrong, or it's socket-only (skip-networking)." ;;
+    ETIMEDOUT|ESOCKETTIMEDOUT)  warn "  → timed out — wrong MYSQL_HOST or a firewall between this box and the DB." ;;
+    ENOTFOUND|EAI_AGAIN)        warn "  → host not found — bad MYSQL_HOST." ;;
+    ER_ACCESS_DENIED_ERROR)     warn "  → access denied — wrong user/password, or the user isn't granted from this host." ;;
+    ER_DBACCESS_DENIED_ERROR)   warn "  → the user cannot access that database — GRANT it on MYSQL_DATABASE." ;;
+    ER_BAD_DB_ERROR)            warn "  → that database does not exist — check MYSQL_DATABASE." ;;
+    ER_NOT_SUPPORTED_AUTH_MODE) warn "  → the user uses socket/sha2 auth (can't auth over TCP) — set it to mysql_native_password." ;;
+    ER_HOST_NOT_PRIVILEGED|ER_HOST_IS_BLOCKED) warn "  → this host isn't allowed to connect — GRANT from the gmtool host's IP." ;;
+    "")                         warn "  → could not run the probe (image not pulled yet?) — re-run after 'docker compose up -d'." ;;
+    *)                          warn "  → see the message above." ;;
+  esac
+  warn "  fix $GMTOOL_DIR/settings.json → auth.mysql, then: (cd $GMTOOL_DIR && $DOCKER compose restart gmtool)"
+  return 1
+}
+
 # --- boot ------------------------------------------------------------------------
 say "starting containers"
 $DOCKER compose up -d
+
+say "checking MySQL connectivity"
+mysql_diag || true
 
 say "waiting for gmtool health (up to 60s)"
 HEALTH_OK=0
@@ -339,7 +373,7 @@ for _ in $(seq 1 30); do
   if curl -fsS "http://127.0.0.1:$PORT/api/health" >/dev/null 2>&1; then HEALTH_OK=1; break; fi
   sleep 2
 done
-[ $HEALTH_OK -eq 1 ] || { $DOCKER compose logs --tail 30 gmtool || true; die "gmtool did not become healthy — see the logs above (usually a settings.json/MySQL problem)"; }
+[ $HEALTH_OK -eq 1 ] || { $DOCKER compose logs --tail 30 gmtool || true; die "gmtool did not become healthy — see the MySQL diagnostic + logs above (usually a settings.json/MySQL problem)"; }
 ok "gmtool is up on port $PORT"
 
 # --- license status ---------------------------------------------------------------
@@ -356,7 +390,7 @@ else
   echo
   echo "  NEXT STEPS"
   echo "  1. Send this fingerprint to $VENDOR_CONTACT:"
-  echo "         ${FP:-'(no fingerprint — is the game DB reachable? check settings.json)'}"
+  echo "         ${FP:-'(no fingerprint — the game DB is unreachable; see the MySQL diagnostic above)'}"
   echo "  2. Replace $GMTOOL_DIR/license.json with the file you receive."
   echo "  3. Run:   cd $GMTOOL_DIR && $DOCKER compose restart gmtool"
   echo "     (or simply re-run this installer — it is safe to repeat)"
