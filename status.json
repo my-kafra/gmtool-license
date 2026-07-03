@@ -3,10 +3,10 @@
     "customers": {
       "newworld": {
         "status": "active",
-        "expiry": "2026-08-31"
+        "expiry": "2027-09-01"
       }
     },
-    "updated": "2026-07-03T09:17:12.213Z"
+    "updated": "2026-07-03T10:24:20.134Z"
   },
-  "sig": "vxtyft79YQ+gzSownGbLkWC1pnF2OOK92QJGQjZCcIopMnWcm7kxn5Ze4Avtv1WrPDula6JLtyvaYc9iUV65Cg=="
+  "sig": "/P3WxljXK8yNwZgIBe7162C+fxCW3gTaO7BZJ9lIavgyqLMVFCNdfxzV6j2HkjwGZn/N6pE9wEvl3GdFFVecBw=="
 }
