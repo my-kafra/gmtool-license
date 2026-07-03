@@ -13,12 +13,17 @@
 #   - no sudo             → requires a working `docker` (group member or
 #                           rootless); otherwise exits with an admin checklist
 #
+# The gmtool image is published PUBLIC on GHCR — NO registry login is required
+# (the image is obfuscated and license-gated; it won't run without a valid,
+# DB-bound license). For a PRIVATE image instead, pass GHCR_TOKEN and the script
+# logs in + wires watchtower's pull credentials.
+#
 # Values may be passed as env vars to skip prompts (hybrid input model):
-#   GMTOOL_DIR GHCR_USER GHCR_TOKEN IMAGE PORT
+#   GMTOOL_DIR IMAGE PORT   [GHCR_USER GHCR_TOKEN — only for a private image]
 #   MYSQL_HOST MYSQL_PORT MYSQL_USER MYSQL_PASSWORD MYSQL_DATABASE
 #   MODE (Renewal|Pre-Renewal)  RATHENA_DIR  FIREWALL (1|0)
 #
-# Vendor: set IMAGE_DEFAULT below before uploading to the static host.
+# Vendor: set IMAGE_DEFAULT below before uploading; make the GHCR package Public.
 set -euo pipefail
 
 # ----------------------------------------------------------------------------
@@ -122,7 +127,7 @@ else
 fi
 $DOCKER compose version >/dev/null 2>&1 || die "docker compose v2 plugin missing (docker-compose-plugin). Re-run with sudo available, or ask your admin."
 
-# --- docker socket + config (watchtower needs both) ---------------------------
+# --- docker socket (+ config dir, only consulted for a private image) ---------
 SOCK="${DOCKER_HOST:-$($DOCKER context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || echo unix:///var/run/docker.sock)}"
 SOCK="${SOCK#unix://}"
 case "$SOCK" in
@@ -136,16 +141,21 @@ fi
 DOCKER_CFG_DIR="${DOCKER_CONFIG:-$HOME/.docker}"
 [ "$DOCKER" = "sudo docker" ] && DOCKER_CFG_DIR="/root/.docker"
 
-# --- GHCR login ----------------------------------------------------------------
-if grep -qs 'ghcr\.io' "$DOCKER_CFG_DIR/config.json" 2>/dev/null; then
-  ok "already logged in to ghcr.io"
-else
-  say "GHCR login (credentials are provided by $VENDOR_CONTACT)"
-  ask GHCR_USER  "GitHub username"
-  ask GHCR_TOKEN "GHCR token (read:packages)" "" secret
+# --- GHCR auth (PUBLIC image → none needed) -----------------------------------
+# Default: the image is public, so no login and no docker-config mount. Private
+# image: set GHCR_TOKEN (+ GHCR_USER) → login + wire credentials into watchtower.
+GHCR_PRIVATE=0
+if [ -n "${GHCR_TOKEN:-}" ]; then
+  ask GHCR_USER "GitHub username (private image pull)"
   printf '%s' "$GHCR_TOKEN" | $DOCKER login ghcr.io -u "$GHCR_USER" --password-stdin \
-    || die "ghcr.io login failed — check the token"
-  ok "logged in to ghcr.io"
+    || die "ghcr.io login failed — check the token (or unset GHCR_TOKEN for a public image)"
+  GHCR_PRIVATE=1
+  ok "logged in to ghcr.io (private image)"
+elif grep -qs 'ghcr\.io' "$DOCKER_CFG_DIR/config.json" 2>/dev/null; then
+  GHCR_PRIVATE=1
+  ok "existing ghcr.io login found — using it (private image)"
+else
+  ok "public image — no registry login needed"
 fi
 
 # --- deployment directory ------------------------------------------------------
@@ -240,8 +250,9 @@ IMAGE=${IMAGE:-$IMAGE_DEFAULT}
 PORT=$PORT
 WATCHTOWER_POLL_INTERVAL=300
 DOCKER_SOCK=$SOCK
-DOCKER_CONFIG_JSON=$DOCKER_CFG_DIR/config.json
 EOF
+  # Private image only: watchtower needs the pull credentials.
+  [ "$GHCR_PRIVATE" = 1 ] && echo "DOCKER_CONFIG_JSON=$DOCKER_CFG_DIR/config.json" >> .env
   ok ".env written"
 fi
 
@@ -256,6 +267,9 @@ else
   if [ -n "${RATHENA_DIR:-}" ] && [ -d "${RATHENA_DIR:-/nonexistent}" ]; then
     RA_MOUNT="      - $RATHENA_DIR:$RATHENA_DIR:z"$'\n'
   fi
+  # Private image only: mount the docker config so watchtower can pull it.
+  WT_CONFIG_MOUNT=""
+  [ "$GHCR_PRIVATE" = 1 ] && WT_CONFIG_MOUNT="      - \${DOCKER_CONFIG_JSON}:/config.json:ro"$'\n'
   cat > docker-compose.yml <<EOF
 services:
   gmtool:
@@ -283,8 +297,7 @@ $RA_MOUNT    labels:
       - label:disable
     volumes:
       - \${DOCKER_SOCK}:/var/run/docker.sock
-      - \${DOCKER_CONFIG_JSON}:/config.json:ro
-    environment:
+$WT_CONFIG_MOUNT    environment:
       - WATCHTOWER_CLEANUP=true
       - WATCHTOWER_LABEL_ENABLE=true
       - WATCHTOWER_POLL_INTERVAL=\${WATCHTOWER_POLL_INTERVAL}
