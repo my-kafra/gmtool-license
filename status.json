@@ -1,9 +1,12 @@
 {
   "data": {
     "customers": {
-      "newworld": "active"
+      "newworld": {
+        "status": "active",
+        "expiry": "2026-08-31"
+      }
     },
-    "updated": "2026-07-03T05:40:12.676Z"
+    "updated": "2026-07-03T09:17:12.213Z"
   },
-  "sig": "78/KkdjEb719aEZFbc7bd+BryB/d99MNjSXO5rM0kuYE4Wj+yDBurqWMF+LubcTSUomvGXaoWUZps8pmEJGKCQ=="
+  "sig": "vxtyft79YQ+gzSownGbLkWC1pnF2OOK92QJGQjZCcIopMnWcm7kxn5Ze4Avtv1WrPDula6JLtyvaYc9iUV65Cg=="
 }
